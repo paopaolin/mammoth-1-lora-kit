@@ -95,7 +95,7 @@ adapter 目录里有 `readout.json`，记录训练时的 `attention=noncausal`�
 合并成完整模型时如果不一起带过去，推理会退回默认 causal，**评测结果全部失真，
 而且不会报错**。
 
-`scripts/merge_adapter.py` 会自动复制，并在缺失时打 WARN。
+`scripts/merge_adapter.py` 会自动复制；**缺失时直接 `sys.exit` 报错**，不再只打告警——因为这种错误不会在评测里显形，只会让所有数字静默失真。
 
 ## 4 逐条命令
 

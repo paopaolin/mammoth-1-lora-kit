@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import math
 import time
 import urllib.request
@@ -110,6 +111,9 @@ def main():
           f"({stats['teacher_correct']/max(1,n):.1%}) | 答错 {stats['teacher_wrong']} | "
           f"失败 {stats['request_failed']}")
     print(f"写成 {args.out}")
+    if stats["request_failed"] or stats["no_overlap"]:
+        sys.exit(f"FATAL: {stats['request_failed']} 条请求失败、{stats['no_overlap']} 条候选不重叠。"
+                 "这两类会静默保留硬标签，导致软/硬比例与预期不符，必须修好再重跑。")
     if ent_t:
         s = sorted(ent_t)
         print(f"teacher 分布熵 中位 {s[len(s)//2]:.4f} | 软标签熵 中位 "

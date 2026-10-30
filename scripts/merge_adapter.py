@@ -50,7 +50,9 @@ def main():
         shutil.copy(src, out / "readout.json")
         print("copied readout.json from adapter", flush=True)
     else:
-        print("WARN: adapter 里没有 readout.json —— 必须手工确认 attention=noncausal", flush=True)
+        # 不能只告警：缺这个文件时推理会静默退回 causal，评测结果全部失真且不报错
+        sys.exit("FATAL: adapter 里没有 readout.json，合并会得到注意力配置错误的模型。"
+                 "请先确认训练用了 --attention noncausal，并从训练产物里补回该文件。")
 
     print(f"saved -> {out}")
     for p in sorted(out.iterdir()):
