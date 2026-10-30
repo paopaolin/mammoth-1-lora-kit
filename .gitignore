@@ -1,0 +1,12 @@
+# 原始数据（用 scripts/build_dataset.py 重新下载生成）
+_raw/
+# 模型权重（54.7GB，从 HF 下）
+models/
+# 训练产物
+runs/
+logs/
+*.log
+# Python
+__pycache__/
+*.py[cod]
+.DS_Store
