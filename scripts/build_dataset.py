@@ -36,6 +36,7 @@ SEED = 42
 
 N_DROP_TRAIN = 500
 N_SYNTH_TRAIN = 200
+N_LONG_TRAIN = 250
 N_ANCHOR_TRAIN = 300
 N_VAL = 150
 N_HELDOUT = 150
@@ -426,6 +427,13 @@ def main():
         ).hexdigest()[:12]
     synth = build_synthetic(rng, N_SYNTH_TRAIN + 50)
 
+    import build_long_policy as blp
+    lp_items = blp.make_items(N_LONG_TRAIN + 50)
+    lp_split = split_grouped(lp_items, "case", {"train": N_LONG_TRAIN, "val": 25, "heldout": 25})
+    l_train = lp_split["train"]
+    l_val = lp_split["val"]
+    l_held = lp_split["heldout"]
+
     t_split = split_grouped(temporal, "section", {"train": N_DROP_TRAIN, "val": 75, "heldout": 75})
     a_split = split_grouped(anchor, "tgroup", {"train": N_ANCHOR_TRAIN, "val": 50, "heldout": 50})
     s_split = split_grouped(synth, "state_text", {"train": N_SYNTH_TRAIN, "val": 25, "heldout": 25})
@@ -440,14 +448,17 @@ def main():
 
     targeted = ([make_drop_task(r, i, rng) for i, r in enumerate(t_train)]
                 + [make_synth_task(r, i, rng) for i, r in enumerate(y_train)]
+                + [blp.to_task(r, i, rng) for i, r in enumerate(l_train)]
                 + [make_anchor_task(r, i, rng) for i, r in enumerate(a_train)])
     rng.shuffle(targeted)
 
     val_tasks = ([make_drop_task(r, i, rng) for i, r in enumerate(t_val)]
                  + [make_synth_task(r, i + 3000, rng) for i, r in enumerate(y_val)]
+                 + [blp.to_task(r, i + 4000, rng) for i, r in enumerate(l_val)]
                  + [make_anchor_task(r, i + 5000, rng) for i, r in enumerate(a_val)])
     held_tasks = ([make_drop_task(r, i + 9000, rng) for i, r in enumerate(t_held)]
                   + [make_synth_task(r, i + 9300, rng) for i, r in enumerate(y_held)]
+                  + [blp.to_task(r, i + 9400, rng) for i, r in enumerate(l_held)]
                   + [make_anchor_task(r, i + 9500, rng) for i, r in enumerate(a_held)])
 
     def dump(name, rows):

@@ -32,18 +32,39 @@ bash scripts/eval_on_tasks.sh 0 models/mammoth-1-tgt eval_sets/crossbench_hard_1
 ## 里面有什么
 
 ```
-├── data/                       训练集（4 个文件，3.1MB）
-│   ├── train_targeted.jsonl     1,000 条，推荐主臂
+├── data/                       训练集（4 个文件，2.8MB）
+│   ├── train_targeted.jsonl     1,250 条，推荐主臂
 │   ├── train_anchor.jsonl         300 条，对照臂（只用锚点数据）
-│   ├── val.jsonl                  150 条，选 checkpoint 用
-│   └── heldout.jsonl              150 条，只用于最终报告
+│   ├── val.jsonl                  175 条，选 checkpoint 用
+│   └── heldout.jsonl              175 条，只用于最终报告
 ├── eval_sets/                  我们自己的两个跨域评测集（各 1,200 条）
-├── scripts/                    check_env / probe_memory / train / merge / eval / 软标签
+├── scripts/
+│   ├── check_env.py             环境自检（版本、tilelang、更不能错的那几项）
+│   ├── probe_memory.sh          真实训练循环跑 5 分钟，读显存实测值
+│   ├── build_dataset.py         重建全部数据（种子 42，可完全复现）
+│   ├── build_long_policy.py     长政策合成题的生成器
+│   ├── make_variants.py         生成 4 个消融子集（第一轮卡 8–11 用）
+│   ├── make_soft_labels.py      软标签构造
+│   ├── train_27b_lora.sh        单卡 LoRA 训练
+│   ├── run_round1.sh            第一轮：12 张卡一次起齐
+│   ├── merge_adapter.py         合并 LoRA + readout.json
+│   ├── eval_round3.sh           第三轮：所有 adapter 并行评测
+│   └── collect_summaries.py     出总表（含 0.9 阈值的采纳精度/覆盖率）
 └── docs/
     ├── 01_experiment_setup.md  实验设置：做什么、为什么、32 卡怎么排
     ├── 02_data_card.md         数据来源、构造规则、已知问题、许可
     ├── 03_env_and_run.md       环境版本、三个必踩的坑、逐条命令
     └── 04_why_this_design.md   9B 那轮的结论，以及它们怎么决定了这次的设计
+```
+
+## 七步走完
+
+```bash
+bash scripts/run_round1.sh                 # 第一步：卡 0 复现 93.94%，其余 11 张并行扫参
+python scripts/collect_summaries.py 'results/*/summary.json'   # 看总表挑胜出配置
+python scripts/merge_adapter.py --adapter runs/<winner>/adapter --out models/<winner>-tgt
+python scripts/make_soft_labels.py ...     # 第二轮：软标签对照
+bash scripts/eval_round3.sh                # 第三轮：32 卡并行评测
 ```
 
 ## 三个必须先知道的事实
