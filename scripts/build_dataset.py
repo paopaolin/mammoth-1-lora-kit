@@ -29,17 +29,23 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
+import os
+
 ROOT = Path(__file__).resolve().parents[1]
 RAW = ROOT / "_raw"
-OUT = ROOT / "data"
+OUT = Path(os.environ.get("OUT_DIR", ROOT / "data"))
+if not OUT.is_absolute():
+    OUT = ROOT / OUT
 SEED = 42
 
-N_DROP_TRAIN = 500
-N_SYNTH_TRAIN = 200
-N_LONG_TRAIN = 250
-N_ANCHOR_TRAIN = 300
-N_VAL = 150
-N_HELDOUT = 150
+# 数量可用环境变量覆盖，方便做数据量消融（见 docs/01 第 4 节 `tgt_2x` 那臂）：
+#   OUT_DIR=data_2x N_DROP=1000 N_LONG=500 python scripts/build_dataset.py
+N_DROP_TRAIN = int(os.environ.get("N_DROP", "500"))
+N_SYNTH_TRAIN = int(os.environ.get("N_SYNTH", "200"))
+N_LONG_TRAIN = int(os.environ.get("N_LONG", "250"))
+N_ANCHOR_TRAIN = int(os.environ.get("N_ANCHOR", "300"))
+# val / heldout 刻意不跟训练量一起放大：扩数据做消融时，评测集必须逐条一样，
+# 否则"涨了还是没涨"分不清是数据量还是换了题。
 
 # 需要"算一步"的问句特征：这些词出现时，答案通常不能直接摘抄
 ARITH = re.compile(
@@ -441,6 +447,17 @@ def main():
     t_train, t_val, t_held = t_split["train"], t_split["val"], t_split["heldout"]
     a_train, a_val, a_held = a_split["train"], a_split["val"], a_split["heldout"]
     y_train, y_val, y_held = s_split["train"], s_split["val"], s_split["heldout"]
+
+    # 扩数据时最容易出的错：某一族的去重空间不够，静默少给，最后只有你发现"怎么才 800 条"。
+    for tag, got, want in (
+        ("drop/train", len(t_train), N_DROP_TRAIN),
+        ("synth/train", len(y_train), N_SYNTH_TRAIN),
+        ("long_policy/train", len(l_train), N_LONG_TRAIN),
+        ("anchor/train", len(a_train), N_ANCHOR_TRAIN),
+        ("drop/val", len(t_val), 75), ("anchor/val", len(a_val), 50),
+    ):
+        if got < want:
+            print(f"  ⚠️  {tag} 只凑到 {got}/{want}（去重空间用尽，见 build_long_policy 的族容量）")
 
     for r, sp in ((t_train, "train"), (t_val, "val"), (t_held, "heldout")):
         for x in r:

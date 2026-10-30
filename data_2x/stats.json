@@ -1,0 +1,109 @@
+{
+  "_seed": 42,
+  "_note": "targeted = DROP temporal_numeric + When2Call anchor; 26B/27B 的错题集中在这两族",
+  "train_targeted": {
+    "n": 1999,
+    "source": {
+      "synthetic_short": 200,
+      "long_policy_synth": 499,
+      "drop": 1000,
+      "when2call": 300
+    },
+    "n_options": {
+      "4": 1699,
+      "3": 300
+    },
+    "gold_position": {
+      "0": 511,
+      "3": 426,
+      "1": 531,
+      "2": 531
+    },
+    "state_chars": {
+      "mean": 943.4,
+      "median": 873,
+      "p95": 2561,
+      "max": 8595
+    }
+  },
+  "train_anchor": {
+    "n": 300,
+    "source": {
+      "when2call": 300
+    },
+    "n_options": {
+      "3": 300
+    },
+    "gold_position": {
+      "1": 94,
+      "2": 100,
+      "0": 106
+    },
+    "state_chars": {
+      "mean": 1425.3,
+      "median": 1155,
+      "p95": 3288,
+      "max": 4534
+    }
+  },
+  "val": {
+    "n": 175,
+    "source": {
+      "drop": 75,
+      "synthetic_short": 25,
+      "long_policy_synth": 25,
+      "when2call": 50
+    },
+    "n_options": {
+      "4": 125,
+      "3": 50
+    },
+    "gold_position": {
+      "1": 44,
+      "2": 55,
+      "3": 35,
+      "0": 41
+    },
+    "state_chars": {
+      "mean": 1235.9,
+      "median": 1173,
+      "p95": 3074,
+      "max": 3930
+    }
+  },
+  "heldout": {
+    "n": 174,
+    "source": {
+      "drop": 75,
+      "synthetic_short": 25,
+      "long_policy_synth": 24,
+      "when2call": 50
+    },
+    "n_options": {
+      "4": 124,
+      "3": 50
+    },
+    "gold_position": {
+      "3": 36,
+      "2": 40,
+      "1": 48,
+      "0": 50
+    },
+    "state_chars": {
+      "mean": 1117.2,
+      "median": 1099,
+      "p95": 2520,
+      "max": 4648
+    }
+  },
+  "counts": {
+    "train_targeted": 1999,
+    "train_anchor": 300,
+    "val": 175,
+    "heldout": 174
+  },
+  "by_source": {
+    "drop_candidates": 15088,
+    "when2call_candidates": 7210
+  }
+}
