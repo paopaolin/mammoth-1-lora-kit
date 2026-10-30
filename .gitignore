@@ -10,3 +10,6 @@ logs/
 __pycache__/
 *.py[cod]
 .DS_Store
+
+# 一次性临时产物/旧版数据
+_stale/
