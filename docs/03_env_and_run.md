@@ -46,24 +46,28 @@ snapshot_download('baselabs/mammoth-1', local_dir='models/mammoth-1', \
 - 目录里必须有的文件：`config.json`、`readout.json`、`tokenizer*`、`chat_template.jinja`
 
 `config.json` 里 `modeling_overrides.attention.full_attention = "block_bidirectional"`，
-推理引擎据此推出 `noncausal`。**训练器不读这个字段，必须命令行显式传 `--attention noncausal`**（坑 1）。
+推理引擎据此推出 `noncausal`。**`train/sft.py` 没有 `--attention` / `--readout` 这类参数**，
+注意力是加载模型时从 config 读的；命令行硬塞会直接 argparse 报错（坑 1）。
 
 ## 3 三个必踩的坑
 
-### 坑 1：`--attention` 默认 causal，会毁掉模型架构
+### 坑 1：别给 `sft.py` 传 `--attention` / `--readout`
+
+老版本（或者我们内部改过的分支）有这两个 flag，**官方 `81ce62f` 没有**。
+传了会立刻失败：
+
+```
+train.sft: error: unrecognized arguments: --attention noncausal --readout slot_lm
+```
 
 `elephant-1` / `mammoth-1` 都是 block-bidirectional attention（材料块与选项块内部双向，
-好让选项之间互相比较）。推理时引擎从 `config.json` 读到这个设置，但
-**`train/sft.py` 用命令行参数直接构造 `ReadoutConfig`，默认值是 `causal`**。
+好让选项之间互相比较），这个设置写在 `config.json` 的 `modeling_overrides` 里，
+由模型加载时读取，和命令行无关。
 
-不加 `--attention noncausal`，等于先把架构改成 causal 再训练，训出来的 adapter
-套回原模型推理时，行为和训练时不一致。
-
-`train_27b_lora.sh` 已经把这两个参数写死：
-
-```
---attention noncausal --readout slot_lm
-```
+**怎么确认它真的生效了**：没有直接的办法，看代理指标——
+卡 0 的基线复现如果得出 93.94%（217/231）、ECE 0.0194，就说明注意力路径是对的；
+如果明显低于这个数（比如 88% 上下），很可能退化成了 causal，先停下来查。
+`scripts/check_env.py` 会把 config 里这一节打印出来，方便对照。
 
 ### 坑 2：Hopper + Triton 3.4.x 会静默算错梯度
 
@@ -91,11 +95,19 @@ H20 和 H100 都是 sm90，一样中招。
 
 ### 坑 3：合并 LoRA 时漏掉 `readout.json`
 
-adapter 目录里有 `readout.json`，记录训练时的 `attention=noncausal`。
-合并成完整模型时如果不一起带过去，推理会退回默认 causal，**评测结果全部失真，
-而且不会报错**。
+`readout.json` 是**底座自带的**（`{"readout": "slot_lm", "head_dim": 256, "n_slots": 256}`），
+训练器不产出它。所以：
 
-`scripts/merge_adapter.py` 会自动复制；**缺失时直接 `sys.exit` 报错**，不再只打告警——因为这种错误不会在评测里显形，只会让所有数字静默失真。
+- adapter 目录里没有它，**这是正常的**，不要因此判定训练失败
+- 合并成完整模型时必须把它从**底座**拷到新目录，否则推理侧读不到 slot 配置
+- 另一个容易漏的是 `config.json` 里的 `modeling_overrides`（注意力）
+
+`scripts/merge_adapter.py` 会从底座拷 `readout.json`，并比对合并前后的
+`modeling_overrides`；底座有、合并后没了就直接 `sys.exit`——因为这种错不会在评测里
+显形，只会让所有数字静默失真。
+
+更省事的办法是训练时直接加 `--merge`，训练器内置合并（产物 `runs/<name>/merged`），
+但这个内置路径**不会**帮你检查上面两个文件，评之前自己 `cat` 一眼。
 
 ## 4 逐条命令
 
@@ -118,18 +130,24 @@ bash scripts/eval_on_tasks.sh 0 models/mammoth-1 eval_sets/public_231.jsonl base
 #   期望：acc 93.94%（217/231），ECE 0.0194
 #   对不上就别往下走
 
-# 3) 训练（1 张卡，1.5-3 小时）
-bash scripts/train_27b_lora.sh 0 data/train_targeted.jsonl tgt_2ep_lr1e5
-#   换参数：EPOCHS=1 LR=5e-6 BRIER=3.0 bash scripts/train_27b_lora.sh 1 ... name
+# 3) LoRA 训练（1 张卡，1.5-3 小时）
+bash scripts/train_27b_lora.sh 0 data/train_targeted.jsonl tgt_2ep_lr1e5 --merge
+#   换参数：EPOCHS=1 LR=5e-6 BRIER=3.0 bash scripts/train_27b_lora.sh 1 ... name --merge
+#   --merge 让训练器最后把 adapter 合进底座，产物 runs/<name>/merged
 
-# 4) 合并
-python scripts/merge_adapter.py --adapter runs/tgt_2ep_lr1e5/adapter \
-                               --out models/mammoth-1-tgt
+# 4) 检查合并产物的两个文件（漏了会导致数字全错且不报错）
+ls runs/tgt_2ep_lr1e5/merged/readout.json
+python -c "import json;c=json.load(open('runs/tgt_2ep_lr1e5/merged/config.json'));\
+print(c.get('modeling_overrides') or c.get('text_config',{}).get('modeling_overrides'))"
 
 # 5) 三个集合各评一次
-bash scripts/eval_on_tasks.sh 0 models/mammoth-1-tgt eval_sets/public_231.jsonl tgt_231
-bash scripts/eval_on_tasks.sh 0 models/mammoth-1-tgt eval_sets/crossbench_random_1200.jsonl tgt_rand
-bash scripts/eval_on_tasks.sh 0 models/mammoth-1-tgt eval_sets/crossbench_hard_1200.jsonl tgt_hard
+bash scripts/eval_on_tasks.sh 0 runs/tgt_2ep_lr1e5/merged eval_sets/public_231.jsonl tgt_231
+bash scripts/eval_on_tasks.sh 0 runs/tgt_2ep_lr1e5/merged eval_sets/crossbench_random_1200.jsonl tgt_rand
+bash scripts/eval_on_tasks.sh 0 runs/tgt_2ep_lr1e5/merged eval_sets/crossbench_hard_1200.jsonl tgt_hard
+
+# 5b) 全量微调（8 卡起，官方 27B 配方；产物 runs/<name>/final 直接评，不用合并）
+bash scripts/train_27b_full.sh 8,9,10,11,12,13,14,15 data/train_targeted.jsonl full_1ep_lr5e6
+bash scripts/eval_on_tasks.sh 8 runs/full_1ep_lr5e6/final eval_sets/public_231.jsonl full_231
 
 # 6) 软标签路线（可选，第 2 轮再做）
 #   先起服务

@@ -7,26 +7,29 @@
 ## 五分钟跑通
 
 ```bash
-# 0. 环境（版本必须对齐，见 docs/03）
-pip install torch==2.8.0 transformers==5.19.0 peft==0.21.2 accelerate --index-url ...
+# 0. 训练框架（官方仓库，自己 clone）
+git clone https://github.com/OmniJev/OneJev
+cd OneJev && git checkout 81ce62f && cd ..
+pip install -e "OneJev[train]"
 pip install tilelang==0.1.15          # Hopper 卡必装，否则梯度会静默算错
-git clone https://github.com/OmniJev/OneJev && cd OneJev && git checkout 81ce62f
 
 # 1. 下模型（54.7GB，MIT 许可，不需要申请）
 python -c "from huggingface_hub import snapshot_download; \
 snapshot_download('baselabs/mammoth-1', local_dir='models/mammoth-1')"
 
 # 2. 自检 + 显存探测（1 张卡，约 10 分钟）
-python scripts/check_env.py
+python scripts/check_env.py                 # 会顺便打印 config 里的注意力/读出头
 bash  scripts/probe_memory.sh 0 2048
 
-# 3. 正式训练（1 张卡，2 小时上下）
-bash scripts/train_27b_lora.sh 0 data/train_targeted.jsonl tgt_2ep_lr1e5
+# 3. 正式训练（1 张卡 LoRA，2 小时上下；--merge 让训练完直接产出可评的完整模型）
+bash scripts/train_27b_lora.sh 0 data/train_targeted.jsonl tgt_2ep_lr1e5 --merge
 
-# 4. 合并 + 评测
-python scripts/merge_adapter.py --adapter runs/tgt_2ep_lr1e5/adapter \
-                               --out models/mammoth-1-tgt
-bash scripts/eval_on_tasks.sh 0 models/mammoth-1-tgt eval_sets/crossbench_hard_1200.jsonl tgt_hard
+# 4. 评测
+bash scripts/eval_on_tasks.sh 0 runs/tgt_2ep_lr1e5/merged eval_sets/crossbench_hard_1200.jsonl tgt_hard
+
+# 5.（可选）8 卡全量微调，官方 27B 配方
+bash scripts/train_27b_full.sh 8,9,10,11,12,13,14,15 data/train_targeted.jsonl full_1ep_lr5e6
+#   产物是 runs/full_1ep_lr5e6/final，完整模型，直接拿去评，不需要合并
 ```
 
 ## 里面有什么
@@ -46,42 +49,48 @@ bash scripts/eval_on_tasks.sh 0 models/mammoth-1-tgt eval_sets/crossbench_hard_1
 │   ├── make_variants.py         生成 4 个消融子集（第一轮卡 8–11 用）
 │   ├── make_soft_labels.py      软标签构造
 │   ├── train_27b_lora.sh        单卡 LoRA 训练
-│   ├── run_round1.sh            第一轮：12 张卡一次起齐
-│   ├── merge_adapter.py         合并 LoRA + readout.json
-│   ├── eval_round3.sh           第三轮：所有 adapter 并行评测
+│   ├── train_27b_full.sh        8 卡全量微调（FSDP，官方 27B 配方）
+│   ├── run_round1.sh            第一轮：8 张卡 LoRA 一次起齐
+│   ├── merge_adapter.py         手工合并 LoRA（训练时加 --merge 就不需要它）
+│   ├── eval_round3.sh           第三轮：所有模型并行评测
 │   └── collect_summaries.py     出总表（含 0.9 阈值的采纳精度/覆盖率）
 └── docs/
     ├── 01_experiment_setup.md  实验设置：做什么、为什么、32 卡怎么排
     ├── 02_data_card.md         数据来源、构造规则、已知问题、许可
     ├── 03_env_and_run.md       环境版本、三个必踩的坑、逐条命令
-    └── 04_why_this_design.md   9B 那轮的结论，以及它们怎么决定了这次的设计
+    └── 04_why_this_design.md   9B 那轮的结论（不看也不影响跑 27B）
 ```
 
 ## 七步走完
 
 ```bash
-bash scripts/run_round1.sh                 # 第一步：卡 0 复现 93.94%，其余 11 张并行扫参
+bash scripts/run_round1.sh                 # 第一步：卡 0 复现 93.94%，卡 1–7 并行扫参
+bash scripts/train_27b_full.sh 8,9,10,11,12,13,14,15 data/train_targeted.jsonl full_1ep_lr5e6
 python scripts/collect_summaries.py 'results/*/summary.json'   # 看总表挑胜出配置
-python scripts/merge_adapter.py --adapter runs/<winner>/adapter --out models/<winner>-tgt
 python scripts/make_soft_labels.py ...     # 第二轮：软标签对照
-bash scripts/eval_round3.sh                # 第三轮：32 卡并行评测
+bash scripts/eval_round3.sh                # 第三轮：并行评测
 ```
 
-## 三个必须先知道的事实
+## 四个必须先知道的事实
 
-**一、27B 的 LoRA 只能单卡跑。** OneJev 训练器第 569 行明确拒绝 `--fsdp` 与 LoRA 同时使用
-（FSDP 只服务全量微调）。所以 32 张 H20 的正确用法是**并行跑多个独立的单卡实验**，
-而不是把一张卡的事拆到 32 张上。
+**一、LoRA 只能单卡，全量必须 8 卡起 FSDP。** OneJev 训练器第 557 行拒绝 `--fsdp`
+配 LoRA（FSDP 只服务全量微调）。所以 LoRA 是"一张卡一个实验、并行跑很多个"，
+全量是"8 张卡一个实验、32 张卡同时跑 3–4 个"。两条路都通，别混着理解。
 
 **二、27B 的准确率空间很小。** 它在 public-231 上已经有 217/231（93.94%），
 14 条错误里 7 条是 temporal_numeric。这个包的数据就是照这 14 条配的。
 **合理预期是 +0~3 条，真正值得测的是校准和路由，不是涨点。**
 
 **三、H20 是 Hopper（sm90），必须装 tilelang。** 否则 fla 的反向 kernel 会算错梯度
-但不报错，训练曲线正常、权重是坏的。我们的 9B 那轮就是被库自己 raise 拦下来的。
+但不报错，训练曲线正常、权重是坏的。
+
+**四、注意力不是命令行参数。** `block_bidirectional` 和 `slot_lm` 读出头写在
+checkpoint 的 `config.json`（`modeling_overrides`）里，`sft.py` 没有
+`--attention` / `--readout` 这种 flag，加了会 argparse 报错。合并模型时要确认
+这一节被带到新 config 里，否则推理静默退回 causal。
 
 ## 我们要什么回
 
-按 [`docs/01_experiment_setup.md`](docs/01_experiment_setup.md) 第 5 节，
-最少回这四样：每个 run 的 `summary.json`、`results.jsonl`、训练日志、以及 adapter 的
-`readout.json`。其余可以后补。
+按 [`docs/01_experiment_setup.md`](docs/01_experiment_setup.md) 第 7 节，
+每个 run 回：`summary.json`、`results.jsonl`、`train.log`，LoRA 再加 `adapter/`。
+全量 run 的 55GB 权重不用传，除非它最后赢了。

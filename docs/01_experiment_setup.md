@@ -32,39 +32,43 @@ tool_selection 和 routing 上——而 27B 这两族是 24 题全对。拿它�
 
 ## 2 三个硬约束（会直接改变方案）
 
-### 约束一：LoRA 不能配 FSDP，只能单卡
+### 约束一：LoRA 只能单卡；全量必须配 FSDP
 
-`OneJev/train/sft.py:569`：
+`OneJev/train/sft.py:557`（commit `81ce62f`）：
 
 ```python
 if args.fsdp and not args.full_finetune:
     raise SystemExit("--fsdp shards a full fine-tune; add --full-finetune")
 ```
 
-也就是说两条路互斥：
+两条路互斥，但**两条都通**，只是资源形状不同：
 
-| 路线 | 显存 | 并行方式 | 适配本任务？ |
-|---|---|---|---|
-| LoRA | 单卡（估算 60–65GB） | **不能分片** | ✅ 数据只有 1,250 条，全量必过拟合 |
-| 全量 + FSDP | 8 卡起 | 张量/优化器分片 | ❌ 1,250 条全量微调 27B 没有意义 |
+| 路线 | 单 run 用卡 | 显存/卡 | 32 卡能同时跑几个 | 适配本任务？ |
+|---|---|---|---|---|
+| LoRA（r32, α64, q/k/v/o） | 1 | 推算 60–65GB | **8–12 个** | ✅ 数据 1,250 条，容量小反而不容易过拟合 |
+| 全量 + FSDP | 8 | 约 54GB（fp32 主权重） | **4 个**（3 个更稳，给评测留卡） | ⚠️ 能跑，但 1,250 条全量微调容易把校准弄坏，只当对照臂 |
 
-**结论：32 张 H20 不是用来把一次训练拆开，而是用来同时跑 32 个独立实验。**
-这是这个包最重要的一个判断，见第 4 节的实验矩阵。
+全量不是我们编的路线：OneJev 官方就带 `train/configs/onejev_27b_full.yaml`
+（`full_finetune: true` + `fsdp: true`, lr 5e-6, 1 epoch, batch_tokens 16384,
+max_rows 64, warmup 3%, grad clip 1.0），`scripts/train_27b_full.sh` 就是照它写的。
+
+**结论：32 张卡不是把一次训练拆开，而是「8 张单卡 LoRA + 3 个 8 卡全量」同时跑。**
+见第 4 节的分配表。
 
 ### 约束二：显存没实测过，必须自己探
 
 我们这边 8 张卡当时全被占满，**没能给你一个实测数字**。按结构推算（54.7GB 权重
 + LoRA 参数与优化器约 0.9GB + 梯度检查点后的激活约 1.5GB + CUDA 上下文碎片约 2GB）
-应该在 **60–65GB**，H20 的 96GB 放得下，H100 的 80GB 也比较紧。
+应该在 **60–65GB**。96GB 的 H20 放得下，80G 的卡就比较紧。
 
 但这是**推算不是实测**。所以第一步就是 `scripts/probe_memory.sh`：它跑真实训练循环
 5 分钟，读 `sft.py` 自己打印的 `mem` 字段。判读标准：
 
 | 实测 mem | 结论 |
 |---|---|
-| < 85G | 单卡 96G 可跑，按该 `batch_tokens` 直接用 |
+| < 85G | 96G 单卡随便跑，`--batch-tokens` 可以往上加到 4096 试 |
 | 85–95G | 把 `--batch-tokens` 降到 1024 |
-| OOM | 降到 512；仍 OOM 说明只能走全量 + FSDP，本方案不适用 |
+| OOM | 降到 512；仍 OOM 就只能走全量 + FSDP |
 
 ### 约束三：H20 是 Hopper，必须装 tilelang
 
@@ -140,50 +144,70 @@ before/after 等词，或同段落有 ≥3 个同量级数字），取高分优�
 
 ## 4 32 张 H20 怎么排
 
-每张卡跑一个独立的单卡实验。一个 27B LoRA run（1,250 条 × 2 epoch）预计
-**1.5–3 小时**（H20 算力弱于 H100，但显存带宽 4.0TB/s 高于 H100 的 3.35TB/s，
-而小 batch 训练是带宽瓶颈，所以差距没有纸面 FLOPs 那么大）。
+两种 run 混着排，因为它们的资源形状不一样：**LoRA 吃 1 张卡，全量吃 8 张卡。**
+一个 27B LoRA run（1,250 条 × 2 epoch）预计 **1.5–3 小时**（H20 算力弱于 H100，
+但显存带宽 4.0TB/s 高于 H100 的 3.35TB/s，小 batch 训练是带宽瓶颈，所以差距
+没有纸面 FLOPs 那么大）；一个全量 run 计算量更小（1 epoch、64 rows/step，
+约 20 步就结束），但 FSDP 初始化 + 54.7GB 权重加载 + 优化器状态构建要 1 小时上下，
+合计 **2–3 小时**。
 
-### 第一轮：摸清方向（12 张卡，一轮约 2–3 小时）
+### 第一轮：32 张卡满配（8 个 LoRA + 3 个全量）
 
-有 32 张卡就没必要一次只跑 8 个：下面 12 张一轮可以同时跑完，
-各卡互不通信、互不影响，出哪一档失败也不拖累别的卡。
+| 卡 | 实验名 | 路线 | 数据 | 关键参数 |
+|---|---|---|---|---|
+| 0 | `base_eval` → `tgt_2ep_lr1e5` | 先评测再训练 | — / targeted | 先复现 93.94%，再跑主臂 |
+| 1 | `tgt_2ep_lr5e6` | LoRA | targeted | 2ep, lr 5e-6 |
+| 2 | `tgt_2ep_lr2e5` | LoRA | targeted | 2ep, lr 2e-5 |
+| 3 | `tgt_1ep_lr1e5` | LoRA | targeted | 1ep |
+| 4 | `tgt_2ep_lr1e5_brier3` | LoRA | targeted | brier_weight 3.0 |
+| 5 | `tgt_2ep_lr1e5_brier5` | LoRA | targeted | brier_weight 5.0 |
+| 6 | `tgt_no_longpolicy` | LoRA | 1,000（去掉长政策） | 2ep, lr 1e-5 |
+| 7 | `anchor_2ep_lr1e5` | LoRA | anchor 300 | 对照臂 |
+| 8–15 | `full_1ep_lr5e6` | **全量 FSDP** | targeted | 官方配方 |
+| 16–23 | `full_1ep_lr2e6` | **全量 FSDP** | targeted | 更保守的 lr |
+| 24–31 | `full_2ep_lr5e6` | **全量 FSDP** | targeted | 多跑一轮，压校准 |
 
-| 卡 | 实验名 | 数据 | 关键参数 |
-|---|---|---|---|
-| 0 | `base_eval` | — | 只评测，确认你复现出 93.94%（**这个先跑，结果先看**） |
-| 1 | `tgt_2ep_lr1e5` | targeted | 2ep, lr 1e-5, brier 1.0 ← 对齐 9B 的 R3，本轮参考点 |
-| 2 | `tgt_2ep_lr5e6` | targeted | 2ep, lr 5e-6 |
-| 3 | `tgt_2ep_lr2e5` | targeted | 2ep, lr 2e-5 |
-| 4 | `tgt_1ep_lr1e5` | targeted | 1ep（对齐 9B 的 R2） |
-| 5 | `tgt_2ep_lr1e5_brier3` | targeted | brier_weight 3.0 |
-| 6 | `tgt_2ep_lr1e5_brier5` | targeted | brier_weight 5.0 |
-| 7 | `anchor_2ep_lr1e5` | anchor | 对照臂，只看 300 条锚点数据 |
-| 8 | `tgt_no_longpolicy` | targeted 去掉长政策（1,000 条） | 2ep, lr 1e-5，消融合成政策数据的作用 |
-| 9 | `tgt_no_anchor` | targeted 去掉 When2Call（950 条） | 同上，验证锚点是否真能防遗忘 |
-| 10 | `tgt_drop_only` | 只用 500 条 DROP | 同上，看长材料单独的作用 |
-| 11 | `tgt_short_only` | 只用 450 条中文短题（长政策 250 + 短场景 200） | 同上，看短题单独的作用 |
+启动方式：LoRA 那 8 张用 `run_round1.sh`（`GPUS=0,1,...,7`），全量三个各起一条
 
-第 0 张卡的结果必须先看：如果复现不出 93.94%，说明环境或推理口径有问题，
-后面所有对比都不成立。
+```bash
+bash scripts/train_27b_full.sh 8,9,10,11,12,13,14,15  data/train_targeted.jsonl full_1ep_lr5e6
+bash scripts/train_27b_full.sh 16,17,18,19,20,21,22,23 data/train_targeted.jsonl full_1ep_lr2e6  LR=2e-6
+bash scripts/train_27b_full.sh 24,25,26,27,28,29,30,31 data/train_targeted.jsonl full_2ep_lr5e6  EPOCHS=2
+```
 
-卡 8–11 这四个消融不是顺手加的：1,250 条里有 450 条是合成数据，
-占训练量的 36%。**如果 250 条长政策对 long_policy 那族没帮助、
-甚至拖累整体，就该把它摘掉。** 判断方法是看 `tgt_no_longpolicy`
-与卡 1 的差：231 上不降且 heldout ECE 更好，就说明合成政策是负资产。
+全量的三个臂是这么选的：第二个把 lr 砍一半，看"更小的更新是不是能保住校准"；
+第三个故意多训一轮，**预期它会把 ECE 弄差**——如果它没变差，说明"全量微调伤校准"
+这个判断在我们这份数据上不成立，那反而是个有价值的结论。
 
-### 第二轮：确认与稳定性（第一轮胜出的 3–4 个配置 × 3 个 seed，12 张卡）
+**卡 0 的基线复现必须先看**：复现不出 93.94%，说明环境或推理口径有问题，
+后面所有对比都不成立。这一步同时也是注意力配置的判据（见 `docs/03` 第 3 节）。
+
+**磁盘要先看**：每个全量 run 的 `final/` 约 55GB，三个就是 165GB。别在快满的
+盘上起，写到一半失败比不跑更浪费时间。
+
+`tgt_no_longpolicy` 不是顺手加的：1,250 条里有 450 条是合成数据，占 36%。
+**如果 250 条长政策对 long_policy 那族没帮助、甚至拖累整体，就该把它摘掉。**
+判断方法：与卡 0 的 `tgt_2ep_lr1e5` 比，231 上不降且 heldout ECE 更好，
+就说明合成政策是负资产。
+
+### 第二轮：确认与稳定性（第一轮胜出的配置 × 3 个 seed）
 
 第一轮胜出的配置重跑 3 个随机种子（`--seed 0/1/2`），确认提升不是噪声。
 231 道题的粒度是 0.43%，涨落 1–2 条完全可能在 seed 噪声范围内——
 **只看单 seed 就下结论是这个规模评测集上最常见的错误。**
 
-剩下 8 张卡做软标签对照（`scripts/make_soft_labels.py` 的产物）：
--| `tgt_soft_2ep_lr1e5` | targeted 软标签版 | α=0.2，teacher 对则注入分布 |
--| `tgt_soft_1ep_lr1e5` | 同上 | 1ep 版，验证 9B 上「2ep 软标签最好」能否迁移到 27B |
+如果全量赢了，它一个 seed 要 8 张卡：3 个 seed 就是 24 张，剩下 8 张跑软标签：
 
-软标签的做法在 `docs/04` 第 3 节；注意 teacher 分布必须先用原始模型
-在训练集上跑一遍得到，**不能用已经微调过的模型自己蒸馏自己**。
+| 卡 | 实验 | 说明 |
+|---|---|---|
+| 0–23 | 全量胜出配置 × seed 0/1/2 | 每个 seed 8 卡 |
+| 24–31 | `tgt_soft_2ep_lr1e5` 等 | 软标签 LoRA 对照，见 `scripts/make_soft_labels.py` |
+
+如果 LoRA 赢了，第二轮就是纯单卡：12 张跑 seed，剩下 20 张跑消融
+（`tgt_no_anchor` / `tgt_drop_only` / `tgt_short_only` / 软标签两档）。
+
+软标签注意：teacher 分布必须先用**原始**模型在训练集上跑一遍得到，
+不能用已经微调过的模型自己蒸馏自己。
 
 ### 第三轮：评测（32 张卡全用上）
 
@@ -262,11 +286,13 @@ python scripts/collect_summaries.py 'results/*/summary.json' --thresholds 0.8,0.
 ## 6 这轮不做什么（避免白跑）
 
 **不把 long_policy 当主战场。** 27B 在这族错 3 条，公开数据集里没有同分布语料，
-所以我们用 250 条规则引擎合成数据做**可插拔的一臂**（卡 8 的 `tgt_no_longpolicy`
+所以我们用 250 条规则引擎合成数据做**可插拔的一臂**（卡 6 的 `tgt_no_longpolicy`
 就是它的对照）。这一臂赢了才留，没赢就摘掉——不要把它的存在当成既定结论。
 
-**不做全量微调。** 1,250 条数据全量微调 27B 会直接过拟合，且 FSDP 路径要 8 卡，
-和你"先简单跑通流程"的目标冲突。
+**不把全量微调当默认路线。** 它有 8 卡 FSDP 的官方配方，能跑，也确实在矩阵里
+（卡 8–31）。但 1,250 条样本全量微调 27B，梯度覆盖整个参数空间，
+最容易出的事就是"准确率不降、置信度全乱"——而置信度恰好是这轮唯一在意的东西。
+所以它是**对照臂**，不是主臂；除非它在四条成功标准上同时赢过 LoRA，否则不采纳。
 
 **不用 231 条调任何超参。** 231 只用于最终报告。选 checkpoint 用 `val.jsonl`，
 拟合温度也用 `val.jsonl`。这轮刻意修正了 9B 那轮的测试集调参问题。
@@ -283,10 +309,16 @@ python scripts/collect_summaries.py 'results/*/summary.json' --thresholds 0.8,0.
 
 ```
 runs/<run_name>/
-├── adapter/                     LoRA 权重（约 200MB）+ readout.json
+├── adapter/                     LoRA 的 adapter 权重（约 200MB，全量 run 里叫 final/）
+├── merged/                      训练时加 --merge 才有：合好的完整模型，直接拿去评
 ├── summary.json                 jevbench summarize 的输出（三个集合各一份）
 ├── results.jsonl                逐题结果（含 probs），这是能复算 ECE/路由的原始数据
 └── train.log                    训练日志（含每步 loss / mem / 是否有 FLA Backend 切换）
 ```
+
+回传时，LoRA run 给 `summary.json` + `results.jsonl` + `train.log` + `adapter/`
+（`merged/` 和 `final/` 有 55GB，别传，回来我们自己合）。
+全量 run 没有 adapter，就只回前三样；**如果最后是全量那臂赢了，再把它的
+`final/` 传到网盘或 HF 上**，一个 55GB 就够，不用每个 seed 都传。
 
 如果空间紧张，`results.jsonl` 和 `summary.json` 必须留，adapter 可以只留最终入选的几个。

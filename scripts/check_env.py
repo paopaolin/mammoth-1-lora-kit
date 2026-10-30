@@ -9,8 +9,12 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib
+import json
+import os
 import sys
+from pathlib import Path
 
 
 def ver(mod: str):
@@ -31,7 +35,48 @@ def parse(v: str):
     return tuple(out + [0] * (3 - len(out)))
 
 
+def check_model_config(model: str | None) -> bool:
+    """注意力与读出头配置必须从 checkpoint 的 config.json 读到。
+
+    训练器（train/common.load_bundle）和评测（qev.engine.DecisionEngine）都走
+    `AutoConfig -> get_text_config()`，所以 `modeling_overrides` 如果在顶层、
+    而 text_config 里没有，加载后可能读不到 —— 那就退化成普通 causal，
+    评测数字会整体偏掉而且不报错。
+    """
+    if not model:
+        return True
+    p = Path(model)
+    if not p.exists():
+        print(f"  （跳过：{model} 不在本地，等模型下好再跑一次）")
+        return True
+    cfg_path = p / "config.json"
+    if not cfg_path.exists():
+        print(f"  ❌ {cfg_path} 不存在")
+        return False
+    cfg = json.loads(cfg_path.read_text())
+    top = cfg.get("modeling_overrides")
+    sub = (cfg.get("text_config") or {}).get("modeling_overrides")
+    print(f"  model_type: {cfg.get('model_type')}  architectures: {cfg.get('architectures')}")
+    print(f"  顶层 modeling_overrides   : {json.dumps(top, ensure_ascii=False)}")
+    print(f"  text_config 里的同名配置 : {json.dumps(sub, ensure_ascii=False)}")
+    if top:
+        att = (top.get("attention") or {}).get("full_attention")
+        print(f"  full_attention = {att}   readout = {top.get('readout')}   "
+              f"n_slots = {top.get('n_slots')}")
+        if sub is None:
+            print("  ⚠️  text_config 里没有这一节。加载器走的是 get_text_config()，")
+            print("     所以「卡 0 能不能复现 93.94%」是唯一可靠的判据——先做那一步。")
+    else:
+        print("  ⚠️  顶层没有 modeling_overrides，确认这个 checkpoint 是不是文本模型")
+    return True
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default=os.environ.get("MODEL"),
+                    help="模型目录，用来看 config.json 里的注意力/读出头配置")
+    cli = ap.parse_args()
+
     ok = True
     print("=== 关键包 ===")
     for name in ("torch", "transformers", "peft", "triton", "causal_conv1d",
@@ -79,6 +124,11 @@ def main():
     tf = ver("transformers")
     if tf and parse(tf)[0] < 5:
         print(f"\n  ❌ transformers {tf} 太旧，qwen3_5 架构需要 >= 5.0（本项目用 5.19.0）")
+        ok = False
+
+    print("\n=== 模型配置（注意力 / 读出头） ===")
+    model = cli.model or str(Path(__file__).resolve().parents[1] / "models" / "mammoth-1")
+    if not check_model_config(model):
         ok = False
 
     print("\n=== 结论 ===")
