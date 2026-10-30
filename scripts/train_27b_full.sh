@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# 多卡全量微调（FSDP）。走 OneJev 官方的 27B 配方，不是我们自己发明的：
-#   train/configs/onejev_27b_full.yaml → full_finetune + fsdp, lr 5e-6, 1 epoch,
-#   batch_tokens 16384, max_rows 64, warmup 3%, grad clip 1.0, 视觉塔冻结
+# 多卡全量微调（FSDP）。超参不是我们拍的，是两处官方来源夹出来的：
+#   1. OneJev train/configs/onejev_27b_full.yaml → full_finetune + fsdp, 1 epoch,
+#      batch_tokens 16384, max_rows 64, warmup 3%, grad clip 1.0, 视觉塔冻结
+#   2. mammoth-1 自己的模型卡（HF README）→ 1 epoch, peak LR **2.7e-6**,
+#      AdamW β 0.9/0.95, no weight decay, 3% warm-up, cosine, bf16, Brier λ=1
+#   默认 lr 取 2.7e-6：那是 mammoth-1 原始训练的峰值，接着它往下训不该超过这个数。
 #
 # 用法：
 #   bash scripts/train_27b_full.sh <GPU列表> <数据文件> <实验名> [额外参数...]
 # 例（8 卡一个 run）：
-#   bash scripts/train_27b_full.sh 8,9,10,11,12,13,14,15 data/train_targeted.jsonl full_1ep_lr5e6
+#   bash scripts/train_27b_full.sh 8,9,10,11,12,13,14,15 data/train_targeted.jsonl full_1ep_lr2p7e6
 #
 # 显存：27B 全量的权重+梯度+AdamW 状态约 430GB，靠 FSDP 摊到 N 张卡上，
 # 8 卡约 54GB/卡（含 fp32 主权重），96GB 的 H20 放得下。**卡数少于 8 不要试**。
@@ -31,7 +34,7 @@ FIRST=$(awk -F',' '{print $1}' <<< "$GPUS")
 # 同一台机器上可能同时在跑好几个 run，端口必须错开，否则第二个 run 起不来
 MASTER_PORT=${MASTER_PORT:-$(( 29500 + FIRST ))}
 
-LR=${LR:-5e-6}
+LR=${LR:-2.7e-6}
 EPOCHS=${EPOCHS:-1}
 MAXLEN=${MAXLEN:-4096}
 BT=${BT:-16384}

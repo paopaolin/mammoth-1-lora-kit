@@ -1,8 +1,29 @@
-# mammoth-1 (27B) 决策模型 LoRA 微调包
+# mammoth-1 (27B) 决策模型 LoRA / 全量微调包
 
-给 27B 决策模型做参数高效适配的完整材料：数据集、实验设置、跑通脚本。
-基于同一套流程在 9B（elephant-1）上的四轮实验结论设计，那部分结果在
-[`docs/04_why_this_design.md`](docs/04_why_this_design.md)。
+给 27B 决策模型做适配的完整材料：数据集、实验设置、跑通脚本。
+
+## 先把三个东西分清楚
+
+这三个常被误当成"三选一"，其实是一层压一层：
+
+| 层 | 是什么 | 在哪 |
+|---|---|---|
+| **模型权重** | mammoth-1，27B，Qwen3.5-27B 后训练而来（CE + Brier λ=1，视觉塔冻结） | `baselabs/mammoth-1`（HF，54.7GB） |
+| **结构配置** | `slot_lm` 答案槽读出、`block_bidirectional` 注意力 | 上面那个 checkpoint 的 `config.json` + `readout.json` |
+| **训练/推理代码** | `train/sft.py`（LoRA 与全量 FSDP 两条路）、`qev.engine.DecisionEngine`、jevbench 评测 | **OneJev** 仓库 |
+
+所以「用 OneJev」不是「不用 mammoth-1」——**我们训的就是 mammoth-1**。
+OneJev 是它指定的运行方式：mammoth-1 的模型卡里，自托管那节写的是
+`setup.sh` installs the pinned serving runtime (**OneJev + serve.patch**)，
+官方推理路径本来就依赖 OneJev 的 `qev.engine`。
+
+反过来，脱离 OneJev 自己写训练器，要复刻的是：答案槽在读出头的位置、
+slot 词表校验、CE + Brier 的加权方式、block-bidirectional 的 mask、
+FSDP 的分片边界。**任何一处和原架构不一致，不是"效果差一点"，是权重直接对不上。**
+这轮唯一要自己决定的是超参和配比，不是训练栈。
+
+要区分的一点：OneJev 自己也发布模型权重（`OmniJev/OneJev1.6-*`），
+那是另一批模型，**我们没在用**；我们只取它的 `train/` 和 `qev/` 代码。
 
 ## 五分钟跑通
 

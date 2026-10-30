@@ -163,21 +163,28 @@ before/after 等词，或同段落有 ≥3 个同量级数字），取高分优�
 | 5 | `tgt_2ep_lr1e5_brier5` | LoRA | targeted | brier_weight 5.0 |
 | 6 | `tgt_no_longpolicy` | LoRA | 1,000（去掉长政策） | 2ep, lr 1e-5 |
 | 7 | `anchor_2ep_lr1e5` | LoRA | anchor 300 | 对照臂 |
-| 8–15 | `full_1ep_lr5e6` | **全量 FSDP** | targeted | 官方配方 |
-| 16–23 | `full_1ep_lr2e6` | **全量 FSDP** | targeted | 更保守的 lr |
-| 24–31 | `full_2ep_lr5e6` | **全量 FSDP** | targeted | 多跑一轮，压校准 |
+| 8–15 | `full_1ep_lr2p7e6` | **全量 FSDP** | targeted | lr 2.7e-6（mammoth-1 原始峰值） |
+| 16–23 | `full_1ep_lr1e6` | **全量 FSDP** | targeted | 半强度 lr |
+| 24–31 | `full_2ep_lr5e6` | **全量 FSDP** | targeted | lr 5e-6 × 2ep，故意过量 |
 
 启动方式：LoRA 那 8 张用 `run_round1.sh`（`GPUS=0,1,...,7`），全量三个各起一条
 
 ```bash
-bash scripts/train_27b_full.sh 8,9,10,11,12,13,14,15  data/train_targeted.jsonl full_1ep_lr5e6
-bash scripts/train_27b_full.sh 16,17,18,19,20,21,22,23 data/train_targeted.jsonl full_1ep_lr2e6  LR=2e-6
-bash scripts/train_27b_full.sh 24,25,26,27,28,29,30,31 data/train_targeted.jsonl full_2ep_lr5e6  EPOCHS=2
+bash scripts/train_27b_full.sh 8,9,10,11,12,13,14,15  data/train_targeted.jsonl full_1ep_lr2p7e6
+bash scripts/train_27b_full.sh 16,17,18,19,20,21,22,23 data/train_targeted.jsonl full_1ep_lr1e6   LR=1e-6
+bash scripts/train_27b_full.sh 24,25,26,27,28,29,30,31 data/train_targeted.jsonl full_2ep_lr5e6   LR=5e-6 EPOCHS=2
 ```
 
-全量的三个臂是这么选的：第二个把 lr 砍一半，看"更小的更新是不是能保住校准"；
-第三个故意多训一轮，**预期它会把 ECE 弄差**——如果它没变差，说明"全量微调伤校准"
-这个判断在我们这份数据上不成立，那反而是个有价值的结论。
+**为什么全量默认 lr 是 2.7e-6，而 OneJev 配置里写的是 5e-6？** 这是两件事。
+`onejev_27b_full.yaml` 是拿 Qwen3.8-27B **从头做决策后训练**的配方；
+mammoth-1 的模型卡写得很清楚：它自己是 6.21M 条、1 epoch、**peak LR 2.7e-6**、
+AdamW β 0.9/0.95、无 weight decay、3% warmup、cosine、Brier λ=1、视觉塔冻结。
+我们现在是**接着一个已经收敛的模型往下训**，峰值抬到 5e-6 没有道理。
+所以 2.7e-6 是主臂，5e-6 只当"压力档"放第三个臂，预期它会把 ECE 弄坏。
+
+三个臂的意图：2.7e-6 是"照原配方接着训"；1e-6 是"半强度，看能不能只动一点点"；
+5e-6×2ep 是"故意过量"。**如果过量那档 ECE 没变差，说明"全量伤校准"这个判断
+在我们这份数据上不成立**——那反而是个有价值的结论。
 
 **卡 0 的基线复现必须先看**：复现不出 93.94%，说明环境或推理口径有问题，
 后面所有对比都不成立。这一步同时也是注意力配置的判据（见 `docs/03` 第 3 节）。
