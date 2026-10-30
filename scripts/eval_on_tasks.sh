@@ -14,7 +14,22 @@ NAME=$4
 PORT=${5:-8100}
 
 WORK=${WORK:-$(cd "$(dirname "$0")/.." && pwd)}
-JB=${JB:-$WORK/jevbench}
+
+# jevbench 的位置有两种常见摆法：单独 clone 在 $WORK/jevbench，或跟着 OneJev 在
+# $ONEJEV/jevbench。以前写死成前者，跟着 docs/03 操作的人会在这里卡住。
+JB=${JB:-}
+if [ -z "$JB" ]; then
+  for c in "$WORK/jevbench" "${ONEJEV:-$WORK/OneJev}/jevbench" "$WORK/OneJev/jevbench"; do
+    if [ -d "$c/jevbench" ]; then JB="$c"; break; fi
+  done
+fi
+if [ -z "$JB" ]; then
+  echo "FATAL: 找不到 jevbench（它在 OneJev 里，或单独 clone 到 \$WORK/jevbench）"
+  echo "  试过：$WORK/jevbench  ${ONEJEV:-$WORK/OneJev}/jevbench"
+  echo "  也可以自己指定：JB=/path/to/jevbench bash $0 ..."
+  exit 1
+fi
+
 OUT=$WORK/results/$NAME
 mkdir -p "$OUT"
 

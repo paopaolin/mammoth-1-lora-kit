@@ -111,6 +111,8 @@ bash scripts/probe_memory.sh 0 2048
 #     OOM    -> 改 512；仍 OOM 说明 27B LoRA 塞不进单卡
 
 # 2) 复现基线（先确认推理口径对，约 10 分钟）
+#   jevbench 跟着 OneJev 走；eval_on_tasks.sh 会自动去 $WORK/jevbench 和
+#   $ONEJEV/jevbench 找，都找不到才报错（可用 JB=/path 指定）
 cat OneJev/jevbench/datasets/public/{easy,original,hard}.jsonl > eval_sets/public_231.jsonl
 bash scripts/eval_on_tasks.sh 0 models/mammoth-1 eval_sets/public_231.jsonl base_27b
 #   期望：acc 93.94%（217/231），ECE 0.0194
